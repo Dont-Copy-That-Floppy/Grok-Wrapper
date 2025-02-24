@@ -7,6 +7,8 @@ import time
 from flask import Flask, request, jsonify
 import threading
 import queue
+import pyotp
+import os
 try:
     from lib import my_secrets, my_crypto
 except:
@@ -16,61 +18,17 @@ except:
     crypto_session = my_crypto.SESSION("x.com")
     email = crypto_session.encrypt_str(input("Please input your login email\n"))
     password = crypto_session.encrypt_str(input("Please input your login password\n"))
+    otp_secret = crypto_session.encrypt_str(input("Please input your login otp secret\n"))
     with open("lib/my_secrets.py", "w") as file:
-        file.writelines(f"x_email = {email}\nx_password = {password}")
+        file.writelines(f"x_email = {email}\nx_password = {password}\nx_otp = {otp_secret}")
     from lib import my_secrets
     print("Creds setup finished\n")
 
 
 class API:
-    onboarding_payload = {
-        "input_flow_data": {"flow_context": {"debug_overrides": {}, "start_location": {"location": "splash_screen"}}},
-        "subtask_versions": {
-            "action_list": 2,
-            "alert_dialog": 1,
-            "app_download_cta": 1,
-            "check_logged_in_account": 1,
-            "choice_selection": 3,
-            "contacts_live_sync_permission_prompt": 0,
-            "cta": 7,
-            "email_verification": 2,
-            "end_flow": 1,
-            "enter_date": 1,
-            "enter_email": 2,
-            "enter_password": 5,
-            "enter_phone": 2,
-            "enter_recaptcha": 1,
-            "enter_text": 5,
-            "enter_username": 2,
-            "generic_urt": 3,
-            "in_app_notification": 1,
-            "interest_picker": 3,
-            "js_instrumentation": 1,
-            "menu_dialog": 1,
-            "notifications_permission_prompt": 2,
-            "open_account": 2,
-            "open_home_timeline": 1,
-            "open_link": 1,
-            "phone_verification": 4,
-            "privacy_options": 1,
-            "security_key": 3,
-            "select_avatar": 4,
-            "select_banner": 2,
-            "settings_list": 7,
-            "show_code": 1,
-            "sign_up": 2,
-            "sign_up_review": 4,
-            "tweet_selection_urt": 1,
-            "update_users": 1,
-            "upload_media": 1,
-            "user_recommendations_list": 4,
-            "user_recommendations_urt": 1,
-            "wait_spinner": 3,
-            "web_modal": 1,
-        },
-    }
     email = ""
     password = ""
+    otp = ""
 
     def __init__(self) -> None:
         try:
@@ -80,45 +38,6 @@ class API:
             self.session.headers.update({"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/112.0"})
         except Exception as e:
             print("Session creation aborted due to %s" % e)
-
-    def get2FA(self) -> str:
-        two2fa_code = ""
-        while True:
-            two2fa_code = input("Please input 2fa code\n")
-            if len(two2fa_code) == 6 and str(two2fa_code).isnumeric():
-                break
-            else:
-                print("Wrong input. 2FA is 6 digits")
-
-        return str(two2fa_code)
-
-    def onboarding(self, step: int, payload: json = None) -> json:
-        url = "https://api.x.com/1.1/onboarding/task.json"
-        if step == 0:
-            response = self.session.post(f"{url}?flow_name=login", json=self.onboarding_payload)
-        else:
-            if step == 1:
-                payload = {**self.onboarding_payload, **{"subtask_inputs": [{"subtask_id": "LoginJsInstrumentationSubtask", "js_instrumentation": {"link": "next_link"}}]}}
-            elif step == 2:
-                payload = {
-                    **self.onboarding_payload,
-                    **{"subtask_inputs": [{"subtask_id": "LoginEnterUserIdentifierSSO", "settings_list": {"setting_responses": [{"key": "user_identifier", "response_data": {"text_data": {"result": self.email}}}], "link": "next_link"}}]},
-                }
-            elif step == 3:
-                payload = {**self.onboarding_payload, **{"subtask_inputs": [{"subtask_id": "LoginEnterPassword", "enter_password": {"password": self.password, "link": "next_link"}}]}}
-            elif step == 4:
-                payload = {**self.onboarding_payload, **{"subtask_inputs": [{"subtask_id": "LoginTwoFactorAuthChallenge", "enter_text": {"text": self.get2FA(), "link": "next_link"}}]}}
-            response = self.session.post(f"{url}", json=payload)
-
-        if response.status_code == 200:
-            try:
-                return json.loads(response.content)
-            except Exception as e:
-                print(f"{response.text}\nFailed to convert response to json.\n")
-                sys.exit()
-        else:
-            print(f"{response.text}\nFailed to retrieve on payload\n{payload}")
-            sys.exit()
 
     def createNewGrokConvo(self) -> str:
         response = self.session.post("https://x.com/i/api/graphql/vvC5uy7pWWHXS2aDi1FZeA/CreateGrokConversation", json={"variables": {}, "queryId": "vvC5uy7pWWHXS2aDi1FZeA"})
@@ -149,7 +68,7 @@ class API:
             "isDeepsearch": isDeepsearch,
             "isReasoning": isReasoning,
         }
-        response = self.session.post("https://grok.x.com/2/grok/add_response.json")
+        response = self.session.post("https://grok.x.com/2/grok/add_response.json", json=payload)
         if response.status_code == 200:
             try:
                 return json.loads(response.content)["data"]["create_grok_conversation"]["conversation_id"]
@@ -227,12 +146,10 @@ class API:
         """
         Auto login with creds. Return if success
         """
-        self.session.get("https://x.com")
-        for step in range(0, 5):
-            result = self.onboarding(step=step)
-            self.onboarding_payload = {"flow_token": result["flow_token"]}
+        nitter = NITTER()
+        self.session = nitter.session
 
-        if result:
+        if nitter.session_entry:
             return True
         else:
             return False
@@ -301,7 +218,154 @@ class OpenAI_SERVER:
         server_thread = threading.Thread(target=self.app.run, kwargs={"host": self.host, "port": self.port}, daemon=True)
         server_thread.start()
         return server_thread
+    
+class NITTER:
+    # license gpv4, author: zedeus
+    TW_CONSUMER_KEY = '3nVuSoBZnx6U4vzUxf5w'
+    TW_CONSUMER_SECRET = 'Bcs59EFbbsdF6Sl9Ng71smgStWEGwXXKSjYvPVt7qys'
+    session_entry = {}
 
+    def __init__(self, username, password, otp_secret):
+        result = self.auth(username, password, otp_secret)
+        if result is None:
+            print("Authentication failed.")
+            sys.exit(1)
+
+        self.session_entry = {
+            "oauth_token": result.get("oauth_token"),
+            "oauth_token_secret": result.get("oauth_token_secret")
+        }
+
+        path = os.path.join(os.getcwd(), 'grok-session')
+        try:
+            with open(path, "a") as f:
+                f.write(json.dumps(self.session_entry) + "\n")
+            print("Authentication successful. Session appended to", path)
+        except Exception as e:
+            print(f"Failed to write session information: {e}")
+            sys.exit(1)
+
+    def auth(self, username, password, otp_secret):
+        bearer_token_req = requests.post("https://api.twitter.com/oauth2/token",
+            auth=(self.TW_CONSUMER_KEY, self.TW_CONSUMER_SECRET),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data='grant_type=client_credentials'
+        ).json()
+        bearer_token = ' '.join(str(x) for x in bearer_token_req.values())
+
+        guest_token = requests.post(
+            "https://api.twitter.com/1.1/guest/activate.json",
+            headers={'Authorization': bearer_token}
+        ).json().get('guest_token')
+
+        if not guest_token:
+            print("Failed to obtain guest token.")
+            sys.exit(1)
+
+        twitter_header = {
+            'Authorization': bearer_token,
+            "Content-Type": "application/json",
+            "User-Agent": "TwitterAndroid/10.21.0-release.0 (310210000-r-0) ONEPLUS+A3010/9 (OnePlus;ONEPLUS+A3010;OnePlus;OnePlus3;0;;1;2016)",
+            "X-Twitter-API-Version": '5',
+            "X-Twitter-Client": "TwitterAndroid",
+            "X-Twitter-Client-Version": "10.21.0-release.0",
+            "OS-Version": "28",
+            "System-User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ONEPLUS A3010 Build/PKQ1.181203.001)",
+            "X-Twitter-Active-User": "yes",
+            "X-Guest-Token": guest_token,
+            "X-Twitter-Client-DeviceID": ""
+        }
+
+        self.session = requests.Session()
+        self.session.headers = twitter_header
+
+        task1 = self.session.post(
+            'https://api.twitter.com/1.1/onboarding/task.json',
+            params={
+                'flow_name': 'login',
+                'api_version': '1',
+                'known_device_token': '',
+                'sim_country_code': 'us'
+            },
+            json={
+                "flow_token": None,
+                "input_flow_data": {
+                    "country_code": None,
+                    "flow_context": {
+                        "referrer_context": {
+                            "referral_details": "utm_source=google-play&utm_medium=organic",
+                            "referrer_url": ""
+                        },
+                        "start_location": {
+                            "location": "deeplink"
+                        }
+                    },
+                    "requested_variant": None,
+                    "target_user_id": 0
+                }
+            }
+        )
+
+        self.session.headers['att'] = task1.headers.get('att')
+
+        task2 = self.session.post(
+            'https://api.twitter.com/1.1/onboarding/task.json',
+            json={
+                "flow_token": task1.json().get('flow_token'),
+                "subtask_inputs": [{
+                    "enter_text": {
+                        "suggestion_id": None,
+                        "text": username,
+                        "link": "next_link"
+                    },
+                    "subtask_id": "LoginEnterUserIdentifier"
+                }]
+            }
+        )
+
+        task3 = self.session.post(
+            'https://api.twitter.com/1.1/onboarding/task.json',
+            json={
+                "flow_token": task2.json().get('flow_token'),
+                "subtask_inputs": [{
+                    "enter_password": {
+                        "password": password,
+                        "link": "next_link"
+                    },
+                    "subtask_id": "LoginEnterPassword"
+                }],
+            }
+        )
+
+        for t3_subtask in task3.json().get('subtasks', []):
+            if "open_account" in t3_subtask:
+                return t3_subtask["open_account"]
+            elif "enter_text" in t3_subtask:
+                response_text = t3_subtask["enter_text"]["hint_text"]
+                totp = pyotp.TOTP(otp_secret)
+                generated_code = totp.now()
+                task4resp = session.post(
+                    "https://api.twitter.com/1.1/onboarding/task.json",
+                    json={
+                        "flow_token": task3.json().get("flow_token"),
+                        "subtask_inputs": [
+                            {
+                                "enter_text": {
+                                    "suggestion_id": None,
+                                    "text": generated_code,
+                                    "link": "next_link",
+                                },
+                                "subtask_id": "LoginTwoFactorAuthChallenge",
+                            }
+                        ],
+                    }
+                )
+                task4 = task4resp.json()
+                for t4_subtask in task4.get("subtasks", []):
+                    if "open_account" in t4_subtask:
+                        return t4_subtask["open_account"]
+
+        return None
 
 if __name__ == "__main__":
     print("Starting main program...")
@@ -310,6 +374,7 @@ if __name__ == "__main__":
     main = API()
     main.email = crypto_session.decrypt_str(my_secrets.x_email)
     main.password = crypto_session.decrypt_str(my_secrets.x_password)
+    main.otp = crypto_session.decrypt_str(my_secrets.x_otp)
     if main.login():
         main_thread = threading.Thread(target=main.runServer, daemon=True)
         main_thread.start()

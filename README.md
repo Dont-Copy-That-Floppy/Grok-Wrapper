@@ -20,6 +20,7 @@ This project is ideal for developers looking to harness the combined power of X.
 - [Flask](https://flask.palletsprojects.com/) for serving API endpoints
 - [pycryptodome](https://www.pycryptodome.org/)
 - [requests](https://requests.readthedocs.io/en/latest/)
+- [pyotp](https://github.com/pyauth/pyotp)
 
 ### Installation
 
