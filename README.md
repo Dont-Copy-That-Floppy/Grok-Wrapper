@@ -26,22 +26,28 @@ This project is ideal for developers looking to harness the combined power of X.
 
 1. **Clone the repository:**
 
-   ```bash
+   ```
    git clone https://github.com/Dont-Copy-That-Floppy/Grok-Wrapper
    cd Grok-Wrapper
    ```
 
 2. **Optional: Create and activate a virtual environment:**
 
-   ```bash
+   ```
    python3 -m venv venv
    source venv/bin/activate  # On Windows use `venv\Scripts\activate`
    ```
 
 3. **Install dependencies:**
 
-   ```bash
+   ```
    pip install -r requirements.txt
+   ```
+
+4. **Run Middleware:**
+
+   ```
+   python grok.py
    ```
 
 ---
@@ -88,7 +94,7 @@ The integration layer takes queries to the localhost at port 8080 that are opena
 
 ## Usage Examples
 
-To use the service use,
+To use the service insert this as the base url in cursor,
 
 ```
 http://localhost:8080/
@@ -110,6 +116,6 @@ This project is licensed under the [GPLv3 License](LICENSE).
 
 For further inquiries or support, please contact:
 
-- **Github:** [LINKs](https://github.com/Dont-Copy-That-Floppy)
+- **Contact/Donate:** [LINKs](https://linktr.ee/f0ll0w.th3.wh1t3.r4bb1t)
 
 ---

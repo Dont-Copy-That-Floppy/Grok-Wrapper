@@ -9,10 +9,13 @@ import threading
 import queue
 import pyotp
 import os
+from typing import Optional
+
 try:
     from lib import my_secrets, my_crypto
 except:
     from lib import my_crypto
+
     print("Setting up new creds...")
     print("Please input a password to store/retrieve your creds")
     crypto_session = my_crypto.SESSION("x.com")
@@ -20,15 +23,19 @@ except:
     password = crypto_session.encrypt_str(input("Please input your login password\n"))
     otp_secret = crypto_session.encrypt_str(input("Please input your login otp secret\n"))
     with open("lib/my_secrets.py", "w") as file:
-        file.writelines(f"x_email = {email}\nx_password = {password}\nx_otp = {otp_secret}")
+        file.writelines(f"x_email = {email}\nx_password = {password}\nx_otp_secret = {otp_secret}")
     from lib import my_secrets
+
     print("Creds setup finished\n")
 
 
 class API:
     email = ""
     password = ""
-    otp = ""
+    otp_secret = ""
+    TW_CONSUMER_KEY = "3nVuSoBZnx6U4vzUxf5w"
+    TW_CONSUMER_SECRET = "Bcs59EFbbsdF6Sl9Ng71smgStWEGwXXKSjYvPVt7qys"
+    session_entry = {}
 
     def __init__(self) -> None:
         try:
@@ -146,13 +153,21 @@ class API:
         """
         Auto login with creds. Return if success
         """
-        nitter = NITTER()
-        self.session = nitter.session
+        result = self.auth_flow()
+        if result is None:
+            print("Authentication failed.")
+            sys.exit(1)
 
-        if nitter.session_entry:
-            return True
-        else:
-            return False
+        self.session_entry = {"oauth_token": result.get("oauth_token"), "oauth_token_secret": result.get("oauth_token_secret")}
+
+        path = os.path.join(os.getcwd(), "grok-session")
+        try:
+            with open(path, "a") as f:
+                f.write(json.dumps(self.session_entry) + "\n")
+            print("Authentication successful. Session appended to", path)
+        except Exception as e:
+            print(f"Failed to write session information: {e}")
+            sys.exit(1)
 
     def runServer(self, timeLength: int = 999999) -> None:
         """
@@ -172,27 +187,117 @@ class API:
                     continue  # No payload available, keep waiting.
 
                 # Process the payload.
-                processed_result = self.convert_openai_to_grok(payload)
-                grok_result = self.talk2grok(conversation_id=grok_conversation_id, message=processed_result)
-                openai_mimic = self.convert_grok_to_openai(grok_result)
-                result_queue.put(openai_mimic)
+                if(payload):
+                    processed_result = self.convert_openai_to_grok(payload)
+                    grok_result = self.talk2grok(conversation_id=grok_conversation_id, message=processed_result)
+                    openai_mimic = self.convert_grok_to_openai(grok_result)
+                    result_queue.put(openai_mimic)
         except KeyboardInterrupt:
             print("Shutting down.")
 
         return None
 
+    def auth_flow(self):  # license GPLv3, author: zedeus
+        bearer_token_req = requests.post("https://api.twitter.com/oauth2/token", auth=(self.TW_CONSUMER_KEY, self.TW_CONSUMER_SECRET), headers={"Content-Type": "application/x-www-form-urlencoded"}, data="grant_type=client_credentials").json()
+        bearer_token = " ".join(str(x) for x in bearer_token_req.values())
+
+        guest_token = requests.post("https://api.twitter.com/1.1/guest/activate.json", headers={"Authorization": bearer_token}).json().get("guest_token")
+
+        if not guest_token:
+            print("Failed to obtain guest token.")
+            sys.exit(1)
+
+        twitter_header = {
+            "Authorization": bearer_token,
+            "Content-Type": "application/json",
+            "User-Agent": "TwitterAndroid/10.21.0-release.0 (310210000-r-0) ONEPLUS+A3010/9 (OnePlus;ONEPLUS+A3010;OnePlus;OnePlus3;0;;1;2016)",
+            "X-Twitter-API-Version": "5",
+            "X-Twitter-Client": "TwitterAndroid",
+            "X-Twitter-Client-Version": "10.21.0-release.0",
+            "OS-Version": "28",
+            "System-User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ONEPLUS A3010 Build/PKQ1.181203.001)",
+            "X-Twitter-Active-User": "yes",
+            "X-Guest-Token": guest_token,
+            "X-Twitter-Client-DeviceID": "",
+        }
+
+        self.session.headers = twitter_header
+
+        task1 = self.session.post(
+            "https://api.twitter.com/1.1/onboarding/task.json",
+            params={"flow_name": "login", "api_version": "1", "known_device_token": "", "sim_country_code": "us"},
+            json={
+                "flow_token": None,
+                "input_flow_data": {
+                    "country_code": None,
+                    "flow_context": {"referrer_context": {"referral_details": "utm_source=google-play&utm_medium=organic", "referrer_url": ""}, "start_location": {"location": "deeplink"}},
+                    "requested_variant": None,
+                    "target_user_id": 0,
+                },
+            },
+        )
+
+        self.session.headers["att"] = task1.headers.get("att")
+
+        task2 = self.session.post(
+            "https://api.twitter.com/1.1/onboarding/task.json",
+            json={"flow_token": task1.json().get("flow_token"), "subtask_inputs": [{"enter_text": {"suggestion_id": None, "text": self.email, "link": "next_link"}, "subtask_id": "LoginEnterUserIdentifier"}]},
+        )
+
+        task3 = self.session.post(
+            "https://api.twitter.com/1.1/onboarding/task.json",
+            json={
+                "flow_token": task2.json().get("flow_token"),
+                "subtask_inputs": [{"enter_password": {"password": self.password, "link": "next_link"}, "subtask_id": "LoginEnterPassword"}],
+            },
+        )
+
+        for t3_subtask in task3.json().get("subtasks", []):
+            if "open_account" in t3_subtask:
+                return t3_subtask["open_account"]
+            elif "enter_text" in t3_subtask:
+                response_text = t3_subtask["enter_text"]["hint_text"]
+                try:
+                    totp = pyotp.TOTP(self.otp_secret)
+                    generated_code = totp.now()
+                except Exception as e:
+                    generated_code = input("Please input 2FA code\n")
+                task4resp = self.session.post(
+                    "https://api.twitter.com/1.1/onboarding/task.json",
+                    json={
+                        "flow_token": task3.json().get("flow_token"),
+                        "subtask_inputs": [
+                            {
+                                "enter_text": {
+                                    "suggestion_id": None,
+                                    "text": generated_code,
+                                    "link": "next_link",
+                                },
+                                "subtask_id": "LoginTwoFactorAuthChallenge",
+                            }
+                        ],
+                    },
+                )
+                task4 = task4resp.json()
+                for t4_subtask in task4.get("subtasks", []):
+                    if "open_account" in t4_subtask:
+                        return t4_subtask["open_account"]
+
+        return None
+
 
 class OpenAI_SERVER:
-    def __init__(self, host="127.0.0.1", port=8080) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 8080) -> None:
         self.app = Flask(__name__)
         self.host = host
         self.port = port
         # Queue to hold incoming payloads.
         self.payload_queue = queue.Queue()
         self.setup_routes()
+        self._server_thread: Optional[threading.Thread] = None
 
     def setup_routes(self) -> None:
-        @self.app.route("/", methods=["POST"])
+        @self.app.route("/chat/completions", methods=["POST"])
         def translate_openai_request() -> json:
             try:
                 # Get the OpenAI JSON payload from the request.
@@ -215,157 +320,21 @@ class OpenAI_SERVER:
 
     def run_threaded(self) -> threading.Thread:
         """Runs the Flask server in a separate daemon thread."""
-        server_thread = threading.Thread(target=self.app.run, kwargs={"host": self.host, "port": self.port}, daemon=True)
-        server_thread.start()
-        return server_thread
-    
-class NITTER:
-    # license gpv4, author: zedeus
-    TW_CONSUMER_KEY = '3nVuSoBZnx6U4vzUxf5w'
-    TW_CONSUMER_SECRET = 'Bcs59EFbbsdF6Sl9Ng71smgStWEGwXXKSjYvPVt7qys'
-    session_entry = {}
-
-    def __init__(self, username, password, otp_secret):
-        result = self.auth(username, password, otp_secret)
-        if result is None:
-            print("Authentication failed.")
-            sys.exit(1)
-
-        self.session_entry = {
-            "oauth_token": result.get("oauth_token"),
-            "oauth_token_secret": result.get("oauth_token_secret")
-        }
-
-        path = os.path.join(os.getcwd(), 'grok-session')
-        try:
-            with open(path, "a") as f:
-                f.write(json.dumps(self.session_entry) + "\n")
-            print("Authentication successful. Session appended to", path)
-        except Exception as e:
-            print(f"Failed to write session information: {e}")
-            sys.exit(1)
-
-    def auth(self, username, password, otp_secret):
-        bearer_token_req = requests.post("https://api.twitter.com/oauth2/token",
-            auth=(self.TW_CONSUMER_KEY, self.TW_CONSUMER_SECRET),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data='grant_type=client_credentials'
-        ).json()
-        bearer_token = ' '.join(str(x) for x in bearer_token_req.values())
-
-        guest_token = requests.post(
-            "https://api.twitter.com/1.1/guest/activate.json",
-            headers={'Authorization': bearer_token}
-        ).json().get('guest_token')
-
-        if not guest_token:
-            print("Failed to obtain guest token.")
-            sys.exit(1)
-
-        twitter_header = {
-            'Authorization': bearer_token,
-            "Content-Type": "application/json",
-            "User-Agent": "TwitterAndroid/10.21.0-release.0 (310210000-r-0) ONEPLUS+A3010/9 (OnePlus;ONEPLUS+A3010;OnePlus;OnePlus3;0;;1;2016)",
-            "X-Twitter-API-Version": '5',
-            "X-Twitter-Client": "TwitterAndroid",
-            "X-Twitter-Client-Version": "10.21.0-release.0",
-            "OS-Version": "28",
-            "System-User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ONEPLUS A3010 Build/PKQ1.181203.001)",
-            "X-Twitter-Active-User": "yes",
-            "X-Guest-Token": guest_token,
-            "X-Twitter-Client-DeviceID": ""
-        }
-
-        self.session = requests.Session()
-        self.session.headers = twitter_header
-
-        task1 = self.session.post(
-            'https://api.twitter.com/1.1/onboarding/task.json',
-            params={
-                'flow_name': 'login',
-                'api_version': '1',
-                'known_device_token': '',
-                'sim_country_code': 'us'
-            },
-            json={
-                "flow_token": None,
-                "input_flow_data": {
-                    "country_code": None,
-                    "flow_context": {
-                        "referrer_context": {
-                            "referral_details": "utm_source=google-play&utm_medium=organic",
-                            "referrer_url": ""
-                        },
-                        "start_location": {
-                            "location": "deeplink"
-                        }
-                    },
-                    "requested_variant": None,
-                    "target_user_id": 0
-                }
-            }
+        if self._server_thread and self._server_thread.is_alive():
+            raise RuntimeError("Server is already running")
+        
+        self._server_thread = threading.Thread(
+            target=self.app.run,
+            kwargs={"host": self.host, "port": self.port},
+            daemon=True
         )
+        self._server_thread.start()
+        return self._server_thread
 
-        self.session.headers['att'] = task1.headers.get('att')
+    def is_running(self) -> bool:
+        """Check if the server is currently running."""
+        return self._server_thread is not None and self._server_thread.is_alive()
 
-        task2 = self.session.post(
-            'https://api.twitter.com/1.1/onboarding/task.json',
-            json={
-                "flow_token": task1.json().get('flow_token'),
-                "subtask_inputs": [{
-                    "enter_text": {
-                        "suggestion_id": None,
-                        "text": username,
-                        "link": "next_link"
-                    },
-                    "subtask_id": "LoginEnterUserIdentifier"
-                }]
-            }
-        )
-
-        task3 = self.session.post(
-            'https://api.twitter.com/1.1/onboarding/task.json',
-            json={
-                "flow_token": task2.json().get('flow_token'),
-                "subtask_inputs": [{
-                    "enter_password": {
-                        "password": password,
-                        "link": "next_link"
-                    },
-                    "subtask_id": "LoginEnterPassword"
-                }],
-            }
-        )
-
-        for t3_subtask in task3.json().get('subtasks', []):
-            if "open_account" in t3_subtask:
-                return t3_subtask["open_account"]
-            elif "enter_text" in t3_subtask:
-                response_text = t3_subtask["enter_text"]["hint_text"]
-                totp = pyotp.TOTP(otp_secret)
-                generated_code = totp.now()
-                task4resp = session.post(
-                    "https://api.twitter.com/1.1/onboarding/task.json",
-                    json={
-                        "flow_token": task3.json().get("flow_token"),
-                        "subtask_inputs": [
-                            {
-                                "enter_text": {
-                                    "suggestion_id": None,
-                                    "text": generated_code,
-                                    "link": "next_link",
-                                },
-                                "subtask_id": "LoginTwoFactorAuthChallenge",
-                            }
-                        ],
-                    }
-                )
-                task4 = task4resp.json()
-                for t4_subtask in task4.get("subtasks", []):
-                    if "open_account" in t4_subtask:
-                        return t4_subtask["open_account"]
-
-        return None
 
 if __name__ == "__main__":
     print("Starting main program...")
@@ -374,7 +343,7 @@ if __name__ == "__main__":
     main = API()
     main.email = crypto_session.decrypt_str(my_secrets.x_email)
     main.password = crypto_session.decrypt_str(my_secrets.x_password)
-    main.otp = crypto_session.decrypt_str(my_secrets.x_otp)
+    main.otp_secret = crypto_session.decrypt_str(my_secrets.x_otp_secret)
     if main.login():
         main_thread = threading.Thread(target=main.runServer, daemon=True)
         main_thread.start()
